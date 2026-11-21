@@ -16,28 +16,75 @@ import android.view.accessibility.AccessibilityEvent
 import android.widget.FrameLayout
 import android.widget.TextView
 import android.widget.Toast
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class AutoPlayService : AccessibilityService() {
 
     companion object {
         var instance: AutoPlayService? = null
-        val BOTOES = listOf("A", "B", "START", "Z", "R",
-            "C_UP", "C_DOWN", "C_LEFT", "C_RIGHT", "STICK")
-        const val STICK_RAIO = 130f
+        val BOTOES = listOf(
+            "A", "B", "START", "Z", "R",
+            "C_UP", "C_DOWN", "C_LEFT", "C_RIGHT",
+            "STICK_CENTER", "STICK_UP", "STICK_DOWN", "STICK_LEFT", "STICK_RIGHT"
+        )
+        val DICAS = mapOf(
+            "STICK_CENTER" to "ANALÓGICO: toque no CENTRO do analógico",
+            "STICK_UP" to "ANALÓGICO: toque até onde o dedo vai para empurrar PARA CIMA",
+            "STICK_DOWN" to "ANALÓGICO: toque até onde o dedo vai para empurrar PARA BAIXO",
+            "STICK_LEFT" to "ANALÓGICO: toque até onde o dedo vai para empurrar para a ESQUERDA",
+            "STICK_RIGHT" to "ANALÓGICO: toque até onde o dedo vai para empurrar para a DIREITA"
+        )
         @Volatile var parar = false
     }
 
     private val prefs by lazy { getSharedPreferences("mapa", Context.MODE_PRIVATE) }
+    private val handler = Handler(Looper.getMainLooper())
+    private var statusView: TextView? = null
+    @Volatile private var falhou = false
 
     override fun onServiceConnected() { instance = this }
     override fun onAccessibilityEvent(e: AccessibilityEvent?) {}
     override fun onInterrupt() {}
     override fun onUnbind(intent: Intent?): Boolean { instance = null; return super.onUnbind(intent) }
 
+    // ---------- Faixa de status no topo ----------
+    private fun status(msg: String?) {
+        handler.post {
+            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+            if (msg == null) {
+                statusView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+                statusView = null
+            } else {
+                if (statusView == null) {
+                    val tv = TextView(this).apply {
+                        setTextColor(Color.WHITE)
+                        setBackgroundColor(Color.argb(210, 0, 0, 0))
+                        textSize = 16f
+                        setPadding(32, 12, 32, 12)
+                    }
+                    val lp = WindowManager.LayoutParams(
+                        WindowManager.LayoutParams.WRAP_CONTENT,
+                        WindowManager.LayoutParams.WRAP_CONTENT,
+                        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                        PixelFormat.TRANSLUCENT
+                    ).apply {
+                        gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                        y = 40
+                    }
+                    wm.addView(tv, lp)
+                    statusView = tv
+                }
+                statusView?.text = msg
+            }
+        }
+    }
+
     // ---------- Mapeamento ----------
     fun iniciarMapeamento(segundos: Int = 10) {
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        val handler = Handler(Looper.getMainLooper())
 
         val contador = TextView(this).apply {
             setTextColor(Color.WHITE)
@@ -84,7 +131,10 @@ class AutoPlayService : AccessibilityService() {
             addView(texto)
         }
         var i = 0
-        fun atualizar() { texto.text = "Toque no botão: ${BOTOES[i]}  (${i + 1}/${BOTOES.size})" }
+        fun atualizar() {
+            val nome = BOTOES[i]
+            texto.text = "${DICAS[nome] ?: "Toque no botão: $nome"}\n(${i + 1}/${BOTOES.size})"
+        }
         atualizar()
 
         raiz.setOnTouchListener { _, ev ->
@@ -110,56 +160,97 @@ class AutoPlayService : AccessibilityService() {
 
     private fun pos(nome: String): Pair<Float, Float>? {
         val s = prefs.getString(nome, null) ?: return null
-        val (x, y) = s.split(",")
-        return x.toFloat() to y.toFloat()
+        val p = s.split(",")
+        return p[0].toFloat() to p[1].toFloat()
+    }
+
+    private fun falta(nome: String): Boolean {
+        falhou = true
+        parar = true
+        status("Não mapeado: $nome - refaça o mapeamento")
+        return false
     }
 
     // ---------- Gestos ----------
-    private fun gesto(x1: Float, y1: Float, x2: Float, y2: Float, dur: Long) {
-        val p = Path().apply {
-            moveTo(x1, y1)
-            lineTo(if (x1 == x2 && y1 == y2) x2 + 0.1f else x2, y2)
+    private fun enviar(g: GestureDescription): Boolean {
+        val latch = CountDownLatch(1)
+        var ok = false
+        val cb = object : AccessibilityService.GestureResultCallback() {
+            override fun onCompleted(d: GestureDescription?) { ok = true; latch.countDown() }
+            override fun onCancelled(d: GestureDescription?) { latch.countDown() }
         }
+        if (!dispatchGesture(g, cb, null)) return false
+        latch.await(70, TimeUnit.SECONDS)
+        return ok
+    }
+
+    private fun duracao(ms: Long): Long =
+        ms.coerceIn(1L, GestureDescription.getMaxGestureDuration())
+
+    private fun apertar(botao: String, ms: Long): Boolean {
+        val (x, y) = pos(botao) ?: return falta(botao)
+        val p = Path().apply { moveTo(x, y) }
         val g = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(p, 0, dur.coerceAtLeast(1)))
+            .addStroke(GestureDescription.StrokeDescription(p, 0, duracao(ms)))
             .build()
-        dispatchGesture(g, null, null)
-        Thread.sleep(dur + 30)
+        return enviar(g)
     }
 
-    private fun apertar(botao: String, ms: Long) {
-        val (x, y) = pos(botao) ?: return
-        gesto(x, y, x, y, ms)
+    private fun arrastarSegurar(x1: Float, y1: Float, x2: Float, y2: Float, ms: Long): Boolean {
+        val ida = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
+        val s1 = GestureDescription.StrokeDescription(ida, 0, 60, true)
+        if (!enviar(GestureDescription.Builder().addStroke(s1).build())) return false
+        val seg = Path().apply { moveTo(x2, y2) }
+        val s2 = s1.continueStroke(seg, 0, duracao(ms), false)
+        return enviar(GestureDescription.Builder().addStroke(s2).build())
     }
 
-    private fun segurarStick(dir: String, ms: Long) {
-        val (x, y) = pos("STICK") ?: return
-        val (dx, dy) = when (dir) {
-            "UP" -> 0f to -STICK_RAIO
-            "DOWN" -> 0f to STICK_RAIO
-            "LEFT" -> -STICK_RAIO to 0f
-            else -> STICK_RAIO to 0f
+    // dir: UP, DOWN, LEFT, RIGHT ou diagonais: UP_LEFT, UP_RIGHT, DOWN_LEFT, DOWN_RIGHT
+    private fun segurarStick(dir: String, ms: Long): Boolean {
+        val c = pos("STICK_CENTER") ?: return falta("STICK_CENTER")
+        val partes = dir.split("_")
+        var dx = 0f
+        var dy = 0f
+        for (d in partes) {
+            val p = pos("STICK_$d") ?: return falta("STICK_$d")
+            dx += p.first - c.first
+            dy += p.second - c.second
         }
-        gesto(x, y, x + dx, y + dy, ms)
+        if (partes.size > 1) { dx *= 0.75f; dy *= 0.75f }
+        return arrastarSegurar(c.first, c.second, c.first + dx, c.second + dy, ms)
     }
 
     // ---------- Roteiro ----------
     fun executar(roteiro: String) {
         parar = false
-        val linhas = roteiro.lines().map { it.trim() }
-            .filter { it.isNotEmpty() && !it.startsWith("#") }
-        rodar(linhas)
+        falhou = false
+        try {
+            val linhas = roteiro.lines().map { it.trim() }
+                .filter { it.isNotEmpty() && !it.startsWith("#") }
+            rodar(linhas)
+            if (!falhou) status(if (parar) "Parado" else "Roteiro terminado")
+        } catch (e: Exception) {
+            status("Erro no roteiro: ${e.message}")
+        }
         parar = true
+        handler.postDelayed({ status(null) }, 5000)
     }
 
     private fun rodar(linhas: List<String>) {
         var i = 0
         while (i < linhas.size && !parar) {
-            val t = linhas[i].split(" ")
+            val t = linhas[i].split(" ").filter { it.isNotEmpty() }
+            status("▶ ${linhas[i]}")
             when (t[0].lowercase()) {
                 "wait" -> Thread.sleep(t[1].toLong())
-                "press" -> apertar(t[1].uppercase(), t.getOrNull(2)?.toLong() ?: 80)
-                "hold" -> segurarStick(t[1].uppercase().removePrefix("STICK_"), t[2].toLong())
+                "press" -> {
+                    val ok = apertar(t[1].uppercase(), t.getOrNull(2)?.toLong() ?: 100)
+                    if (!ok && !falhou) { falhou = true; parar = true; status("Toque falhou: ${linhas[i]}") }
+                }
+                "hold" -> {
+                    val ok = segurarStick(t[1].uppercase().removePrefix("STICK_"), t[2].toLong())
+                    if (!ok && !falhou) { falhou = true; parar = true; status("Toque falhou: ${linhas[i]}") }
+                }
                 "repeat" -> {
                     var prof = 1; var j = i + 1
                     while (j < linhas.size && prof > 0) {
