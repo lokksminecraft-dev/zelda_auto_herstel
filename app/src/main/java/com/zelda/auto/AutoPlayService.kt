@@ -7,6 +7,8 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.WindowManager
@@ -33,7 +35,46 @@ class AutoPlayService : AccessibilityService() {
     override fun onUnbind(intent: Intent?): Boolean { instance = null; return super.onUnbind(intent) }
 
     // ---------- Mapeamento ----------
-    fun iniciarMapeamento() {
+    fun iniciarMapeamento(segundos: Int = 10) {
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        val handler = Handler(Looper.getMainLooper())
+
+        val contador = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.argb(200, 0, 0, 0))
+            textSize = 22f
+            setPadding(40, 20, 40, 20)
+        }
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            y = 80
+        }
+        wm.addView(contador, lp)
+
+        var restante = segundos
+        val tick = object : Runnable {
+            override fun run() {
+                if (restante > 0) {
+                    contador.text = "Mapeamento em ${restante}s - entre no jogo"
+                    restante--
+                    handler.postDelayed(this, 1000)
+                } else {
+                    wm.removeView(contador)
+                    mostrarMapeamento()
+                }
+            }
+        }
+        handler.post(tick)
+    }
+
+    private fun mostrarMapeamento() {
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         val texto = TextView(this).apply {
             setTextColor(Color.WHITE); textSize = 20f; gravity = Gravity.CENTER
