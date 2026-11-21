@@ -8,6 +8,8 @@ import android.text.InputType
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import android.widget.Toast
 
 class MainActivity : Activity() {
@@ -16,6 +18,38 @@ class MainActivity : Activity() {
         super.onCreate(b)
         val prefs = getSharedPreferences("mapa", MODE_PRIVATE)
 
+        Thread.setDefaultUncaughtExceptionHandler { _, e ->
+            prefs.edit().putString("erro", e.stackTraceToString()).commit()
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }
+
+        val erro = prefs.getString("erro", null)
+        if (erro != null) {
+            prefs.edit().remove("erro").commit()
+            setContentView(ScrollView(this).apply {
+                addView(TextView(this@MainActivity).apply {
+                    text = "ERRO ANTERIOR:\n\n$erro"
+                    setTextIsSelectable(true)
+                    setPadding(24, 48, 24, 24)
+                })
+            })
+            return
+        }
+
+        try {
+            montarTela(prefs)
+        } catch (e: Throwable) {
+            setContentView(ScrollView(this).apply {
+                addView(TextView(this@MainActivity).apply {
+                    text = "ERRO:\n\n${e.stackTraceToString()}"
+                    setTextIsSelectable(true)
+                    setPadding(24, 48, 24, 24)
+                })
+            })
+        }
+    }
+
+    private fun montarTela(prefs: android.content.SharedPreferences) {
         val roteiro = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
             setText(prefs.getString("roteiro", EXEMPLO))
@@ -33,10 +67,10 @@ class MainActivity : Activity() {
             addView(botao("1. Ativar serviço de acessibilidade") {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             })
-            addView(botao("2. Mapear botões (abra o emulador depois)") {
+            addView(botao("2. Mapear botões (10s para abrir o jogo)") {
                 val s = AutoPlayService.instance
                 if (s == null) toast("Ative o serviço primeiro") else {
-                    s.iniciarMapeamento()
+                    s.iniciarMapeamento(10)
                     startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME))
                 }
             })
@@ -54,22 +88,12 @@ class MainActivity : Activity() {
             addView(botao("Parar") { AutoPlayService.parar = true })
             addView(roteiro)
         }
-        setContentView(raiz)
+        setContentView(ScrollView(this).apply { addView(raiz) })
     }
 
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
 
     companion object {
-        const val EXEMPLO = """# Comandos: wait ms | press BOTAO [ms] | hold STICK_UP|DOWN|LEFT|RIGHT ms | repeat N ... end
-wait 3000
-press START
-wait 1000
-press A
-hold STICK_UP 2500
-repeat 4
-press A
-wait 500
-end
-"""
+        const val EXEMPLO = "# Comandos: wait ms | press BOTAO [ms] | hold STICK_UP|DOWN|LEFT|RIGHT ms | repeat N ... end\nwait 3000\npress START\nwait 1000\npress A\nhold STICK_UP 2500\nrepeat 4\npress A\nwait 500\nend\n"
     }
 }
